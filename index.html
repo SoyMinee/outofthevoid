@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Out of the Void</title>
+    <style>
+        body {
+            background-color: #000; color: #fff; font-family: monospace;
+            display: flex; flex-direction: column; align-items: center;
+            justify-content: center; height: 100vh; margin: 0; overflow: hidden;
+            user-select: none;
+        }
+        #game-wrapper { display: flex; gap: 20px; align-items: flex-start; }
+        canvas { background-color: #000; border: 2px solid #fff; image-rendering: pixelated; }
+        #sidebar {
+            width: 280px; height: 480px; border: 1px solid #555; padding: 10px;
+            box-sizing: border-box; display: flex; flex-direction: column; overflow-y: auto;
+        }
+        #sidebar::-webkit-scrollbar { width: 5px; }
+        #sidebar::-webkit-scrollbar-thumb { background: #555; }
+        #sidebar h3 { margin-top: 0; text-align: center; border-bottom: 1px dashed #555; padding-bottom: 10px; }
+        #inventory { display: flex; flex-wrap: wrap; gap: 8px; align-content: flex-start; }
+        
+        .inv-item {
+            width: 36px; height: 36px; border: 1px solid #fff; display: flex;
+            align-items: center; justify-content: center; font-size: 18px;
+            cursor: crosshair; position: relative; color: #ffeb3b;
+        }
+        .inv-item .tooltip {
+            visibility: hidden; 
+            width: 220px; 
+            background-color: #111; 
+            color: #fff;
+            text-align: left; 
+            border: 1px solid #fff; 
+            padding: 8px; 
+            
+            /* CAMBIO CLAVE: position fixed escapa del overflow */
+            position: fixed;
+            top: auto; 
+            bottom: 30px; /* Aparecerá siempre en la parte inferior de la pantalla */
+            left: 50%; 
+            transform: translateX(-50%);
+            
+            z-index: 100;
+            font-size: 12px; 
+            opacity: 0; 
+            transition: opacity 0.2s; 
+            pointer-events: none;
+        }
+        .inv-item:hover .tooltip { visibility: visible; opacity: 1; z-index: 30; }
+        .tooltip strong { color: #ffeb3b; }
+
+        #ui { width: 640px; display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 16px; }
+        #log {
+            width: 640px; height: 80px; margin-top: 10px; border: 1px solid #555;
+            padding: 5px; overflow-y: hidden; color: #ccc; line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <span id="statsClass">Clase: ---</span>
+        <span id="statsHP">HP: 0/0</span>
+        <span id="statsAtk">ATK: 0 | ARMOR: 0</span>
+        <span id="statsFloor">Piso: 1</span>
+    </div>
+
+    <div id="game-wrapper">
+        <canvas id="gameCanvas" width="640" height="480"></canvas>
+        <div id="sidebar">
+            <h3>Reliquias</h3>
+            <div id="inventory"></div>
+        </div>
+    </div>
+
+    <div id="log">Cargando el Vacío...</div>
+    <div id="global-tooltip"></div>
+
+    <script>
+        // ============================================================================
+        // 🎵 CONTROLADOR DE AUDIO (Marcadores de posición para tus archivos)
+        // ============================================================================
+        const AUDIO_RUTAS = {
+            // Música de Fondo (BGM)
+            bgm_menu: "sonidos/bgm_menu.mp3",
+            bgm_exploracion_general: "sonidos/bgm_void_ambience.mp3",
+            bgm_exploracion_profunda: "sonidos/bgm_dungeon.mp3",
+            bgm_jefe_fase1: "sonidos/bgm_boss_march.mp3",
+            bgm_jefe_final: "sonidos/bgm_final_void.mp3",
+
+            // Efectos de Sonido (SFX)
+            sfx_ataque_jugador: "sonidos/sfx_hit.wav",
+            sfx_ataque_critico: "sonidos/sfx_crit.wav",
+            sfx_dano_recibido: "sonidos/sfx_hurt.wav",
+            sfx_esquive_perfecto: "sonidos/sfx_dodge.wav",
+            sfx_reliquia_recogida: "sonidos/sfx_pickup.wav",
+            sfx_nota_fallada: "sonidos/sfx_miss.wav"
+        };
+
+        // Función global para reproducir SFX cuando añadas tus archivos
+        // Variable global para controlar la música de fondo
+        let musicaFondo = new Audio();
+        musicaFondo.loop = true;
+
+        // Función para cambiar música
+        function playBGM(nombreBGM) {
+            if (musicaFondo.src.includes(AUDIO_RUTAS[nombreBGM])) return; // Ya está sonando
+            musicaFondo.src = AUDIO_RUTAS[nombreBGM];
+            musicaFondo.volume = 0.3;
+            musicaFondo.play().catch(e => console.log("Esperando interacción..."));
+        }
+
+        // Función SFX optimizada (reutiliza el canal)
+        function playSFX(nombreEfecto) {
+            let sfx = new Audio(AUDIO_RUTAS[nombreEfecto]);
+            sfx.volume = 0.5;
+            sfx.play().catch(e => console.warn("Error reproduciendo SFX: " + e));
+        }
+        // ============================================================================
+
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const uiClass = document.getElementById('statsClass');
+        const uiHP = document.getElementById('statsHP');
+        const uiAtk = document.getElementById('statsAtk');
+        const uiFloor = document.getElementById('statsFloor');
+        const uiLog = document.getElementById('log');
+        const divInventario = document.getElementById('inventory');
+
+        const TILE_SIZE = 32, COLS = 20, ROWS = 15;
+
+        // Estados: TITULO, SELECCION, EXPLORACION, COMBATE, MUERTO
+        let estadoJuego = "TITULO"; 
+        let subEstadoCombate = "MENU"; // MENU, RITMO_DEFENSA
+        
+        let mapa = [], pisoActual = 1, escaleras = {x:0, y:0}, enemigos = [], objetosMapa = [];
+        let enemigoActivo = null;
+
+        // Propiedades del Minijuego de Ritmo (QTE)
+        let notasQTE = [];
+        const X_ZONA_HIT = 120; // Dónde debe pulsar la tecla el jugador
+        const RANGO_HIT = 25;   // Margen de píxeles para el "PERFECT"
+        let fallosQTE = 0;
+        let aciertosQTE = 0;
+
+        let jugador = {
+            x: 0, y: 0, clase: "", hp: 10, maxHp: 10, atk: 2, armor: 0, inventario: [],
+            critChance: 0.0, dodgeChance: 0.0, vampirismo: 0, curaPorCritico: 0, curaPorPiso: 0,
+            pactoDeSangre: false, espinas: 0, ataqueDoble: 0.0, regenCombate: 0,
+            guardia: false, coronaCristal: false
+        };
+
+        // Pool abreviada de reliquias (mantiene las mecánicas anteriores expandidas internamente)
+        const BASE_OBJETOS = [
+            { char: "+", nom: "Corazón Fuerte", desc: "+3 Max HP.", ef: p => { p.maxHp+=3; p.hp+=3; } },
+            { char: "!", nom: "Daga Larga", desc: "+1 Daño.", ef: p => p.atk += 1 },
+            { char: "[", nom: "Placa de Hierro", desc: "+1 Armadura (Reduce daño recibido).", ef: p => p.armor += 1 },
+            { char: "*", nom: "Piedra de Afilar", desc: "+2 Daño.", ef: p => p.atk += 2 },
+            { char: "O", nom: "Brazalete de Roble", desc: "+5 Max HP.", ef: p => { p.maxHp+=5; p.hp+=5; } },
+            { char: "i", nom: "Flecha Rota", desc: "+1 Daño, +5% Crítico.", ef: p => { p.atk+=1; p.critChance+=0.05; } },
+            { char: "V", nom: "Yelmo Pesado", desc: "+2 Armadura, -5% Esquivar.", ef: p => { p.armor+=2; p.dodgeChance-=0.05; } },
+            { char: "+", nom: "Vitalidad Pura", desc: "+10 Max HP.", ef: p => { p.maxHp+=10; p.hp+=10; } },
+            { char: "l", nom: "Estoque Fino", desc: "+1 Daño, +10% Crítico.", ef: p => { p.atk+=1; p.critChance+=0.10; } },
+            { char: "U", nom: "Escudo Torre", desc: "+3 Armadura.", ef: p => p.armor += 3 },
+
+            // Críticos y Evasión (11-20)
+            { char: "c", nom: "Lente de Precisión", desc: "+15% Crítico.", ef: p => p.critChance += 0.15 },
+            { char: "~", nom: "Capa de Sombras", desc: "+15% Esquivar.", ef: p => p.dodgeChance += 0.15 },
+            { char: "s", nom: "Zapatos Ligeros", desc: "+10% Esquivar.", ef: p => p.dodgeChance += 0.10 },
+            { char: "x", nom: "Marca del Asesino", desc: "+25% Crítico.", ef: p => p.critChance += 0.25 },
+            { char: "j", nom: "Polvo de Hadas", desc: "+20% Esquivar.", ef: p => p.dodgeChance += 0.20 },
+            { char: "C", nom: "Guantelete Suerte", desc: "+10% Crítico, +1 Daño.", ef: p => { p.critChance+=0.1; p.atk+=1; } },
+            { char: "W", nom: "Capa de Viento", desc: "+25% Esquivar.", ef: p => p.dodgeChance += 0.25 },
+            { char: "q", nom: "Ojo de Halcón", desc: "+20% Crítico.", ef: p => p.critChance += 0.20 },
+            { char: "T", nom: "Paso Fantasma", desc: "+30% Esquivar, -5 Max HP.", ef: p => { p.dodgeChance+=0.3; p.maxHp-=5; } },
+            { char: "F", nom: "Furia Ciega", desc: "+40% Crítico, -2 Armadura.", ef: p => { p.critChance+=0.4; p.armor-=2; } },
+
+            // Curación y Supervivencia (21-30)
+            { char: "o", nom: "Anillo Vampírico", desc: "Cura 1 HP al matar.", ef: p => p.vampirismo += 1 },
+            { char: "O", nom: "Collar de Sangre", desc: "Cura 2 HP al matar.", ef: p => p.vampirismo += 2 },
+            { char: "v", nom: "Diente Sanguijuela", desc: "Cura 2 HP al hacer Crítico.", ef: p => p.curaPorCritico += 2 },
+            { char: "u", nom: "Vial Goteante", desc: "Cura 3 HP al bajar de piso.", ef: p => p.curaPorPiso += 3 },
+            { char: "b", nom: "Botiquín", desc: "Cura 5 HP al bajar de piso.", ef: p => p.curaPorPiso += 5 },
+            { char: "r", nom: "Musgo Curativo", desc: "Cura 1 HP cada turno de combate.", ef: p => p.regenCombate += 1 },
+            { char: "R", nom: "Troll Blood", desc: "Cura 2 HP cada turno de combate.", ef: p => p.regenCombate += 2 },
+            { char: "m", nom: "Médula Ósea", desc: "Cura 4 HP al hacer Crítico.", ef: p => p.curaPorCritico += 4 },
+            { char: "A", nom: "Cáliz de Vida", desc: "Cura 5 HP al matar.", ef: p => p.vampirismo += 5 },
+            { char: "e", nom: "Estómago de Hierro", desc: "+10 Max HP, Cura 5 HP por piso.", ef: p => { p.maxHp+=10; p.curaPorPiso+=5; } },
+
+            // Daño Reflejado y Multi-golpes (31-40)
+            { char: "#", nom: "Armadura de Espinas", desc: "Devuelve 1 de daño al ser atacado.", ef: p => p.espinas += 1 },
+            { char: "E", nom: "Rosa de Hierro", desc: "Devuelve 3 de daño al ser atacado.", ef: p => p.espinas += 3 },
+            { char: "K", nom: "Katar Doble", desc: "10% prob. de atacar dos veces.", ef: p => p.ataqueDoble += 0.1 },
+            { char: "X", nom: "Hachas Gemelas", desc: "25% prob. de atacar dos veces.", ef: p => p.ataqueDoble += 0.25 },
+            { char: "M", nom: "Espejo Roto", desc: "Devuelve 5 daño, pero -2 Armadura.", ef: p => { p.espinas+=5; p.armor-=2; } },
+            { char: "Y", nom: "Eco del Vacío", desc: "40% prob. de atacar dos veces.", ef: p => p.ataqueDoble += 0.4 },
+            { char: "Z", nom: "Aura Punzante", desc: "+1 Armadura, Devuelve 2 daño.", ef: p => { p.armor+=1; p.espinas+=2; } },
+            { char: "D", nom: "Daga Danzante", desc: "20% prob. ataque doble, +10% Crit.", ef: p => { p.ataqueDoble+=0.2; p.critChance+=0.1; } },
+            { char: "H", nom: "Púas Tóxicas", desc: "Devuelve 4 daño al ser atacado.", ef: p => p.espinas += 4 },
+            { char: "Q", nom: "Cuchillo Carnicero", desc: "Cura 1 HP por turno, 15% Ataque doble.", ef: p => { p.regenCombate+=1; p.ataqueDoble+=0.15; } },
+
+            // Objetos Malditos y Game Changers (41-50)
+            { char: "6", nom: "Pacto de Sangre", desc: "+4 Daño, pierdes 1 HP al atacar.", ef: p => { p.atk+=4; p.pactoDeSangre=true; } },
+            { char: "7", nom: "Pacto Mayor", desc: "+8 Daño, pierdes 2 HP al atacar.", ef: p => { p.atk+=8; p.pactoDeSangre=true; } },
+            { char: "8", nom: "Gema de Cristal", desc: "Max HP = 1. Daño x5.", ef: p => { p.coronaCristal=true; p.maxHp=1; p.hp=1; p.atk*=5; } },
+            { char: "9", nom: "Maldición Pesada", desc: "+20 Max HP, -5 Daño (Mínimo 1).", ef: p => { p.maxHp+=20; p.hp+=20; p.atk = Math.max(1, p.atk-5); } },
+            { char: "$", nom: "Moneda Trucada", desc: "50% Crítico, 0% Esquivar.", ef: p => { p.critChance+=0.5; p.dodgeChance=0; } },
+            { char: "%", nom: "Reloj Roto", desc: "+5 Armadura, 0% Ataque doble.", ef: p => { p.armor+=5; p.ataqueDoble=0; } },
+            { char: "&", nom: "Sangre Hirviendo", desc: "Robas 5 HP al matar, recibes +2 daño.", ef: p => { p.vampirismo+=5; p.armor-=2; } },
+            { char: "?", nom: "Dado del Caos", desc: "100% prob. ataque doble. 0% Crítico.", ef: p => { p.ataqueDoble=1.0; p.critChance=0; } },
+            { char: "@", nom: "Alma Atada", desc: "Regeneras 5 HP/turno. -10 Max HP.", ef: p => { p.regenCombate+=5; p.maxHp = Math.max(1, p.maxHp-10); p.hp=Math.min(p.hp, p.maxHp); } },
+            { char: "!", nom: "El Todo", desc: "+2 Daño, +2 Armadura, +2 HP, +5% todo.", ef: p => { p.atk+=2; p.armor+=2; p.maxHp+=2; p.critChance+=0.05; p.dodgeChance+=0.05; } }
+        ];
+
+        function log(msg) {
+            let m = msg.split("<br>");
+            m.forEach(line => {
+                mensajes.push(line);
+                if (mensajes.length > 4) mensajes.shift();
+            });
+            uiLog.innerHTML = mensajes.join('<br>');
+            actualizarUI();
+        }
+        let mensajes = [];
+
+        function actualizarUI() {
+            uiClass.innerText = `Clase: ${jugador.clase}`;
+            uiHP.innerText = `HP: ${jugador.hp}/${jugador.maxHp}`;
+            uiAtk.innerText = `ATK: ${jugador.atk} | ARMOR: ${jugador.armor}`;
+            uiFloor.innerText = `Piso: ${pisoActual} ${pisoActual % 3 === 0 ? '¡JEFE!' : ''}`;
+
+            divInventario.innerHTML = '';
+            jugador.inventario.forEach(obj => {
+                let div = document.createElement('div'); div.className = 'inv-item'; div.innerText = obj.char;
+                let tooltip = document.createElement('div'); tooltip.className = 'tooltip';
+                tooltip.innerHTML = `<strong>${obj.nom}</strong><br>${obj.desc}`;
+                div.appendChild(tooltip); divInventario.appendChild(div);
+            });
+        }
+
+        function seleccionarClase(opcion) {
+            if(opcion === 1) { jugador.clase = "Caballero"; jugador.maxHp = 20; jugador.hp = 20; jugador.atk = 2; jugador.armor = 1; }
+            if(opcion === 2) { jugador.clase = "Pícaro"; jugador.maxHp = 12; jugador.hp = 12; jugador.atk = 3; jugador.critChance = 0.20; jugador.dodgeChance = 0.15; }
+            if(opcion === 3) { jugador.clase = "Hereje"; jugador.maxHp = 10; jugador.hp = 10; jugador.atk = 2; jugador.vampirismo = 2; }
+            estadoJuego = "EXPLORACION";
+            log("Has despertado en la estructura cambiante.");
+            generarMapa();
+        }
+
+        // ============================================================================
+        // 🗺️ GENERACIÓN PROCEDURAL (Con detección de Jefes)
+        // ============================================================================
+        function generarMapa() {
+            mapa = Array(ROWS).fill().map(() => Array(COLS).fill(0));
+            enemigos = []; objetosMapa = [];
+            
+            // ¿Es piso de Jefe? (Cada 3 pisos)
+            if (pisoActual % 3 === 0) {
+                // Crear una gran sala de arena cuadrada limpia
+                for(let r=3; r<ROWS-3; r++) {
+                    for(let c=4; c<COLS-4; c++) {
+                        mapa[r][c] = 1;
+                    }
+                }
+                jugador.x = 5; jugador.y = 7;
+                escaleras = { x: 14, y: 7 };
+
+                // Determinar tipo de jefe
+                let numJefe = pisoActual / 3;
+                let nombreJefe = numJefe === 1 ? "EL OBSIDIANO" : numJefe === 2 ? "AMALGAMACIÓN DE ALMAS" : "EL SEÑOR DEL VACÍO";
+
+                enemigos.push({
+                    x: 11, y: 7,
+                    hp: 20 + (numJefe * 15),
+                    maxHp: 20 + (numJefe * 15),
+                    atk: 3 + (numJefe * 2),
+                    char: "Ω",
+                    esJefe: true,
+                    nombre: nombreJefe,
+                    bgm: 'bgm_jefe_fase1'
+                });
+                log(`⚠️ PISO DE JEFE: La salida está sellada por ${nombreJefe}.`);
+                return;
+            }
+
+            // Generación normal si no es piso de jefe
+            let baldosasCreadas = 0; const metaBaldosas = 110 + (pisoActual * 4);
+            let x = Math.floor(COLS / 2), y = Math.floor(ROWS / 2);
+            while (baldosasCreadas < metaBaldosas) {
+                if (mapa[y][x] === 0) { mapa[y][x] = 1; baldosasCreadas++; }
+                const dir = Math.floor(Math.random() * 4);
+                if (dir === 0 && y > 1) y--; else if (dir === 1 && y < ROWS - 2) y++;
+                else if (dir === 2 && x > 1) x--; else if (dir === 3 && x < COLS - 2) x++;
+            }
+
+            let libres = [];
+            for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (mapa[r][c] === 1) libres.push({x: c, y: r});
+            libres.sort(() => Math.random() - 0.5);
+
+            let posJ = libres.pop(); jugador.x = posJ.x; jugador.y = posJ.y;
+            escaleras = libres.pop();
+
+            let numEnemigos = 3 + Math.floor(pisoActual * 0.8);
+            for(let i = 0; i < numEnemigos; i++) {
+                if(libres.length === 0) break;
+                let pE = libres.pop();
+                enemigos.push({ x: pE.x, y: pE.y, hp: 4 + Math.floor(pisoActual * 1.5), atk: 1 + Math.floor(pisoActual/2), char: "E", esJefe: false, nombre: "Sombra" });
+            }
+
+            if(libres.length > 0) {
+                objetosMapa.push({ x: libres.pop().x, y: libres.pop().y, data: BASE_OBJETOS[Math.floor(Math.random() * BASE_OBJETOS.length)] });
+            }
+        }
+
+        // ============================================================================
+        // ⚔️ SISTEMA DE COMBATE Y MINIJUEGO DE RITMO (QTE)
+        // ============================================================================
+        function iniciarCombate(enemigo) {
+            playBGM(enemigos[0].bgm);
+            estadoJuego = "COMBATE";
+            subEstadoCombate = "MENU";
+            enemigoActivo = enemigo;
+            jugador.guardia = false;
+            log(`Enfrentamiento contra ${enemigo.nombre}.`);
+        }
+
+        function lanzarAtaqueJugador() {
+            if (jugador.pactoDeSangre) {
+                jugador.hp -= 1; log("Pacto de sangre: Pierdes 1 HP.");
+            }
+            let dmg = jugador.atk;
+            if (Math.random() < jugador.critChance) {
+                dmg *= 2; log(`¡CRÍTICO BRUTAL! Causal ${dmg} daño.`);
+                playSFX("sfx_ataque_critico");
+                if (jugador.curaPorCritico > 0) { jugador.hp = Math.min(jugador.hp + jugador.curaPorCritico, jugador.maxHp); }
+            } else {
+                log(`Golpeas al enemigo causando ${dmg} daño.`);
+                playSFX("sfx_ataque_jugador");
+            }
+            enemigoActivo.hp -= dmg;
+        }
+
+        function procesarMenuCombate(accion) {
+            if (accion === 'ATACAR') {
+                lanzarAtaqueJugador();
+                if (enemigoActivo.hp > 0 && Math.random() < jugador.ataqueDoble) {
+                    log("¡Ráfaga! Atacas de nuevo."); lanzarAtaqueJugador();
+                }
+            } else if (accion === 'DEFENDER') {
+                jugador.guardia = true;
+                log("Te preparas en Guardia (Notas más lentas, mitigas 50% de fallos).");
+            } else if (accion === 'HUIR') {
+                if (enemigoActivo.esJefe) { log("¡No puedes huir de un JEFE!"); return; }
+                if (Math.random() > 0.5) { log("Escapas al mapa."); enemigoActivo = null; estadoJuego = "EXPLORACION"; return; }
+                else log("Fallas al intentar huir.");
+            }
+
+            // Comprobar muerte del enemigo antes de su contraataque
+            if (enemigoActivo.hp <= 0) {
+                log(`¡${enemigoActivo.nombre} eliminado!`);
+                if (jugador.vampirismo > 0) { jugador.hp = Math.min(jugador.hp + jugador.vampirismo, jugador.maxHp); }
+                enemigos = enemigos.filter(e => e !== enemigoActivo);
+                enemigoActivo = null; estadoJuego = "EXPLORACION";
+                actualizarUI();
+                return;
+            }
+
+            // Si sobrevive, arranca el turno defensivo de ritmo
+            iniciarFaseDefensaRitmo();
+        }
+
+        function iniciarFaseDefensaRitmo() {
+            subEstadoCombate = "RITMO_DEFENSA";
+            notasQTE = [];
+            fallosQTE = 0;
+            aciertosQTE = 0;
+
+            // Parámetros basados en si es un jefe o enemigo común
+            let cantidadNotas = enemigoActivo.esJefe ? 6 : 3;
+            let velocidad = enemigoActivo.esJefe ? 5.5 : 3.5;
+            let letrasPosibles = ['A', 'S', 'D', 'F', 'J', 'T', 'C', 'N', 'K', 'B'];
+
+            // Si el jugador eligió defenderse el turno anterior, penalizamos la velocidad de ataque del rival
+            if (jugador.guardia) {
+                velocidad *= 0.8;
+            }
+
+            // Spawnea una ristra de notas secuenciales moviéndose desde la derecha
+            for (let i = 0; i < cantidadNotas; i++) {
+                let letraRandom = letrasPosibles[Math.floor(Math.random() * letrasPosibles.length)];
+                notasQTE.push({
+                    x: 600 + (i * 110), // Espaciado horizontal
+                    letra: letraRandom,
+                    procesada: false
+                });
+            }
+            log(`¡Esquiva! Pulsa las letras cuando crucen la línea.`);
+        }
+
+        function actualizarLogicaRitmo() {
+            if (estadoJuego !== "COMBATE" || subEstadoCombate !== "RITMO_DEFENSA") return;
+
+            let todasProcesadas = true;
+            let velocidad = enemigoActivo.esJefe ? 5.5 : 3.5;
+            if (jugador.guardia) velocidad *= 0.5;
+
+            notasQTE.forEach(nota => {
+                if (!nota.procesada) {
+                    nota.x -= velocidad; // Desplazar hacia la izquierda
+                    todasProcesadas = false;
+
+                    // Si se sale de la pantalla por la izquierda, cuenta como fallo absoluto
+                    if (nota.x < X_ZONA_HIT - RANGO_HIT && !nota.procesada) {
+                        nota.procesada = true;
+                        fallosQTE++;
+                        playSFX("sfx_nota_fallada");
+                    }
+                }
+            });
+
+            // Si ya cruzaron todas las notas, calculamos resolución de daños sufridos
+            if (todasProcesadas) {
+                finalizarFaseDefensaRitmo();
+            }
+        }
+
+        function presionarTeclaRitmo(letraPresionada) {
+            // Buscar la nota no procesada más cercana a la barra de colisión
+            let notaCercana = null;
+            let menorDistancia = 9999;
+
+            notasQTE.forEach(nota => {
+                if (!nota.procesada && nota.letra === letraPresionada) {
+                    let dist = Math.abs(nota.x - X_ZONA_HIT);
+                    if (dist < menorDistancia) {
+                        menorDistancia = dist;
+                        notaCercana = nota;
+                    }
+                }
+            });
+
+            if (notaCercana && menorDistancia <= RANGO_HIT) {
+                // ¡Esquive exitoso!
+                notaCercana.procesada = true;
+                aciertosQTE++;
+                playSFX("sfx_esquive_perfecto");
+            } else {
+                // Si pulsa una tecla incorrecta o fuera de tiempo de forma errática
+                fallosQTE++;
+                playSFX("sfx_nota_fallada");
+            }
+        }
+
+        function finalizarFaseDefensaRitmo() {
+            // El daño se escala proporcionalmente según los fallos cometidos en el teclado
+            let ratioFallos = fallosQTE / notasQTE.length;
+            let dmgBaseEnemigo = enemigoActivo.atk;
+            
+            let dmgFinal = Math.ceil(dmgBaseEnemigo * ratioFallos);
+            if (jugador.guardia) dmgFinal = Math.ceil(dmgFinal / 2); // Mitigación extra por escudo
+
+            // Aplicar reducción estática por armadura
+            dmgFinal = Math.max(0, dmgFinal - jugador.armor);
+            
+            if (dmgFinal > 0) {
+                if (Math.random() < jugador.dodgeChance && !enemigoActivo.esJefe) {
+                    log("¡Tu Capa pasiva te salvó milagrosamente de recibir daño!");
+                } else {
+                    jugador.hp -= dmgFinal;
+                    log(`Recibes ${dmgFinal} de daño por fallar el ritmo.`);
+                    playSFX("sfx_dano_recibido");
+                }
+            } else {
+                log("¡ESQUIVE PERFECTO! Te deslizas entre los ataques sin un rasguño.");
+            }
+
+            // Daño por espinas pasivas si el enemigo te tocó
+            if (jugador.espinas > 0 && ratioFallos > 0) {
+                enemigoActivo.hp -= jugador.espinas;
+                log(`Tus espinas devuelven ${jugador.espinas} de daño.`);
+            }
+
+            // Comprobación de estado vital tras el ataque
+            if (jugador.hp <= 0) {
+                estadoJuego = "MUERTO";
+                log("EL VACÍO HA RECLAMADO TU ALMA.<br>F5 o recarga para reintentar.");
+            } else if (enemigoActivo.hp <= 0) {
+                log(`¡Las espinas destruyeron a ${enemigoActivo.nombre}!`);
+                enemigos = enemigos.filter(e => e !== enemigoActivo);
+                enemigoActivo = null; estadoJuego = "EXPLORACION";
+            } else {
+                // Volver a dar el turno al jugador
+                subEstadoCombate = "MENU";
+                jugador.guardia = false;
+            }
+            actualizarUI();
+        }
+
+        // ============================================================================
+        // 🗺️ MOVIMIENTO EN MAPAS
+        // ============================================================================
+        function intentarMover(dx, dy) {
+            if (estadoJuego !== "EXPLORACION") return;
+            let nx = jugador.x + dx; let ny = jugador.y + dy;
+            if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS || mapa[ny][nx] === 0) return;
+
+            let ene = enemigos.find(e => e.x === nx && e.y === ny);
+            if (ene) { iniciarCombate(ene); return; }
+
+            jugador.x = nx; jugador.y = ny;
+
+            // Tomar objetos del suelo
+            let objIndex = objetosMapa.findIndex(o => o.x === jugador.x && o.y === jugador.y);
+            if (objIndex > -1) {
+                let rec = objetosMapa[objIndex].data;
+                rec.ef(jugador);
+                if (jugador.coronaCristal) { jugador.maxHp = 1; jugador.hp = 1; }
+                jugador.inventario.push(rec);
+                log(`Encuentras: ${rec.nom}`);
+                playSFX("sfx_reliquia_recogida");
+                objetosMapa.splice(objIndex, 1);
+                actualizarUI();
+            }
+
+            // Escaleras bloqueadas si hay un jefe presente
+            if (jugador.x === escaleras.x && jugador.y === escaleras.y) {
+                if (enemigos.some(e => e.esJefe)) {
+                    log("Una barrera del Vacío bloquea las escaleras. Debes matar al Jefe.");
+                    return;
+                }
+                pisoActual++;
+                log(`Desciendes más profundo... Piso ${pisoActual}.`);
+                if (jugador.curaPorPiso > 0) jugador.hp = Math.min(jugador.hp + jugador.curaPorPiso, jugador.maxHp);
+                generarMapa();
+            }
+
+            // Movimiento inteligente simple de monstruos comunes
+            enemigos.forEach(e => {
+                if (e.esJefe) return; // Los jefes vigilan estáticos el centro de su sala
+                let distX = jugador.x - e.x, distY = jugador.y - e.y, dist = Math.abs(distX) + Math.abs(distY);
+                if (dist < 5 && dist > 1) {
+                    let dx = 0, dy = 0;
+                    if (Math.abs(distX) > Math.abs(distY)) dx = Math.sign(distX); else dy = Math.sign(distY);
+                    let nx = e.x + dx, ny = e.y + dy;
+                    if (mapa[ny][nx] === 1 && !enemigos.some(en => en.x === nx && en.y === ny)) { e.x = nx; e.y = ny; }
+                }
+            });
+        }
+
+        // ============================================================================
+        // ⌨️ ASIGNACIÓN DE TECLADOS
+        // ============================================================================
+        window.addEventListener('keydown', (e) => {
+            // Evitar que el espacio o las flechas muevan la ventana del navegador web
+            if(["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) {
+                e.preventDefault();
+            }
+
+            let keyUpper = e.key.toUpperCase();
+
+            if (estadoJuego === "TITULO") {
+                if (e.code === 'Space') { estadoJuego = "SELECCION"; }
+            } else if (estadoJuego === "SELECCION") {
+                if (e.key === '1') seleccionarClase(1);
+                if (e.key === '2') seleccionarClase(2);
+                if (e.key === '3') seleccionarClase(3);
+                
+            } else if (estadoJuego === "EXPLORACION") {
+                if (['ArrowUp', 'w', 'W'].includes(e.key)) intentarMover(0, -1);
+                if (['ArrowDown', 's', 'S'].includes(e.key)) intentarMover(0, 1);
+                if (['ArrowLeft', 'a', 'A'].includes(e.key)) intentarMover(-1, 0);
+                if (['ArrowRight', 'd', 'D'].includes(e.key)) intentarMover(1, 0);
+            } else if (estadoJuego === "COMBATE") {
+                if (subEstadoCombate === "MENU") {
+                    if (e.key === '1') procesarMenuCombate('ATACAR');
+                    if (e.key === '2') procesarMenuCombate('DEFENDER');
+                    if (e.key === '3') procesarMenuCombate('HUIR');
+                } else if (subEstadoCombate === "RITMO_DEFENSA") {
+                    if (['A', 'S', 'D', 'F'].includes(keyUpper)) {
+                        presionarTeclaRitmo(keyUpper);
+                    }
+                }
+            }
+        });
+
+        // ============================================================================
+        // 🖥️ BUCLE PRINCIPAL DE JUEGO Y RENDERIZADO CANVAS
+        // ============================================================================
+        function gameLoop() {
+            // Ejecutar cálculos lógicos del minijuego de ritmo de forma fluida
+            actualizarLogicaRitmo();
+            
+            // Renderizar la escena correspondiente
+            dibujar();
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        function dibujar() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (estadoJuego === "TITULO") {
+                ctx.fillStyle = "#fff"; ctx.textAlign = "center"; ctx.font = "bold 44px monospace";
+                ctx.fillText("OUT OF THE VOID", canvas.width/2, canvas.height/2 - 20);
+                ctx.font = "16px monospace";
+                if (Math.floor(Date.now() / 400) % 2 === 0) ctx.fillText("Pulsa ESPACIO para ingresar al vacío", canvas.width/2, canvas.height/2 + 45);
+                return;
+            }
+
+            if (estadoJuego === "SELECCION") {
+                ctx.fillStyle = "#fff"; ctx.textAlign = "center"; ctx.font = "bold 26px monospace";
+                ctx.fillText("ELIGE TU RECIPIENTE", canvas.width/2, 60);
+                ctx.font = "16px monospace"; ctx.textAlign = "left";
+                ctx.fillText("[1] EL CABALLERO (HP:20 ATK:2 ARMOR:1) - Robusto y firme", 60, 160);
+                ctx.fillText("[2] EL PÍCARO    (HP:12 ATK:3 CRIT:20%) - Evasivo e inestable", 60, 240);
+                ctx.fillText("[3] EL HEREJE    (HP:10 ATK:2 VAMP:2)  - Se nutre de la muerte", 60, 320);
+                return;
+            }
+
+            if (estadoJuego === "EXPLORACION" || estadoJuego === "MUERTO") {
+                playBGM('bgm_exploracion_general');
+                ctx.font = "24px monospace"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+                for (let y = 0; y < ROWS; y++) {
+                    for (let x = 0; x < COLS; x++) {
+                        let px = x*TILE_SIZE, py = y*TILE_SIZE;
+                        if (mapa[y][x] === 0) {
+                            ctx.fillStyle = "#fff"; ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
+                            ctx.fillStyle = "#000"; ctx.fillRect(px+2, py+2, TILE_SIZE-4, TILE_SIZE-4);
+                        } else { ctx.fillStyle = "#222"; ctx.fillRect(px+15, py+15, 2, 2); }
+                    }
+                }
+                ctx.fillStyle = "#fff"; ctx.fillText(">", escaleras.x*TILE_SIZE+16, escaleras.y*TILE_SIZE+16);
+                ctx.fillStyle = "#ffeb3b"; objetosMapa.forEach(o => ctx.fillText(o.data.char, o.x*TILE_SIZE+16, o.y*TILE_SIZE+16));
+                ctx.fillStyle = "#ff5555"; enemigos.forEach(e => ctx.fillText(e.char, e.x*TILE_SIZE+16, e.y*TILE_SIZE+16));
+                
+                ctx.fillStyle = (jugador.hp > 0) ? "#55ff55" : "#ff0000";
+                ctx.fillText((jugador.hp > 0) ? "@" : "X", jugador.x*TILE_SIZE+16, jugador.y*TILE_SIZE+16);
+            } 
+            
+            else if (estadoJuego === "COMBATE") {
+                ctx.fillStyle = "#fff"; ctx.fillRect(50, 60, canvas.width-100, 2);
+
+                // Dibujar sprites conceptuales 1-bit
+                ctx.fillStyle = "#55ff55"; ctx.font = "70px monospace"; ctx.textAlign = "center";
+                ctx.fillText("@", canvas.width/4, canvas.height/2 - 40);
+                ctx.font = "16px monospace"; ctx.fillText("HÉROE", canvas.width/4, canvas.height/2 + 25);
+
+                ctx.fillStyle = "#ff5555"; ctx.font = "70px monospace";
+                ctx.fillText(enemigoActivo.char, 3*canvas.width/4, canvas.height/2 - 40);
+                ctx.font = "16px monospace"; ctx.fillText(enemigoActivo.nombre, 3*canvas.width/4, canvas.height/2 + 25);
+                ctx.fillText(`HP: ${enemigoActivo.hp}`, 3*canvas.width/4, canvas.height/2 + 50);
+
+                ctx.fillStyle = "#fff"; ctx.fillRect(50, canvas.height-160, canvas.width-100, 2);
+
+                if (subEstadoCombate === "MENU") {
+                    ctx.textAlign = "left"; ctx.font = "16px monospace";
+                    ctx.fillText("[1] Ejecutar Ataque", 60, canvas.height-120);
+                    ctx.fillText("[2] Posición de Guardia (Ralentiza notas de ritmo)", 60, canvas.height-85);
+                    ctx.fillText("[3] Huir del peligro", 60, canvas.height-50);
+                } 
+                
+                else if (subEstadoCombate === "RITMO_DEFENSA") {
+                    ctx.textAlign = "left"; ctx.font = "bold 14px monospace";
+                    ctx.fillText("¡CUIDADO! EL ENEMIGO CONTRAATACA. DEFIÉNDETE:", 60, canvas.height-130);
+                    
+                    // Render de la pista de ritmo interactiva
+                    let pistaY = canvas.height - 75;
+                    ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
+                    ctx.beginPath(); ctx.moveTo(60, pistaY); ctx.lineTo(580, pistaY); ctx.stroke();
+
+                    // Zona de Evasión (Pulsar aquí)
+                    ctx.fillStyle = "#333"; ctx.fillRect(X_ZONA_HIT - RANGO_HIT, pistaY - 20, RANGO_HIT * 2, 40);
+                    ctx.strokeStyle = "#fff"; ctx.strokeRect(X_ZONA_HIT - RANGO_HIT, pistaY - 20, RANGO_HIT * 2, 40);
+                    ctx.fillStyle = "#fff"; ctx.font = "10px monospace"; ctx.textAlign = "center";
+                    ctx.fillText("HIT", X_ZONA_HIT, pistaY + 30);
+
+                    // Renderizar las letras voladoras
+                    ctx.font = "bold 20px monospace";
+                    notasQTE.forEach(nota => {
+                        if (!nota.procesada) {
+                            ctx.fillStyle = (Math.abs(nota.x - X_ZONA_HIT) <= RANGO_HIT) ? "#55ff55" : "#fff";
+                            ctx.fillText(nota.letra, nota.x, pistaY);
+                        }
+                    });
+                }
+            }
+        }
+
+        // --- Lanzar la ejecución continua ---
+        gameLoop();
+        actualizarUI();
+    </script>
+</body>
+</html>
