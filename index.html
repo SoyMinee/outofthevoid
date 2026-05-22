@@ -17,6 +17,26 @@
             width: 280px; height: 480px; border: 1px solid #555; padding: 10px;
             box-sizing: border-box; display: flex; flex-direction: column; overflow-y: auto;
         }
+        #left-stats {
+            width: 220px; height: 480px; border: 1px solid #555; padding: 10px;
+            box-sizing: border-box; display: flex; flex-direction: column; overflow-y: auto;
+            margin-right: 6px;
+        }
+        #statsTable { font-size: 14px; color: #fff; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+        #statsTable .label { color: #ccc; text-align: left; }
+        #statsTable .value { color: #ffeb3b; text-align: right; }
+        .stat-diff {
+            display: inline-block;
+            font-size: 12px;
+            margin-right: 6px;
+            opacity: 0;
+            transform: translateY(6px);
+            transition: opacity 300ms ease, transform 300ms ease;
+        }
+        .stat-diff.up { color: #7CFC00; } /* verde brillante */
+        .stat-diff.down { color: #ff6961; } /* rojo claro */
+        .stat-diff.show { opacity: 1; transform: translateY(0); }
+        .stat-diff.hide { opacity: 0; transform: translateY(-6px); transition: opacity 500ms ease, transform 500ms ease; }
         #sidebar::-webkit-scrollbar { width: 5px; }
         #sidebar::-webkit-scrollbar-thumb { background: #555; }
         #sidebar h3 { margin-top: 0; text-align: center; border-bottom: 1px dashed #555; padding-bottom: 10px; }
@@ -67,8 +87,16 @@
         <span id="statsAtk">ATK: 0 | ARMOR: 0</span>
         <span id="statsFloor">Piso: 1</span>
     </div>
+    <div id="xpBarContainer" style="width: 640px; height: 14px; border:1px solid #555; margin-top:6px;">
+        <div id="xpBarFill" style="height:100%; width:0%; background: linear-gradient(90deg,#6a9cff,#3b7fff);"></div>
+        <div id="xpBarText" style="position:relative; margin-top:-14px; text-align:center; color:#fff; font-size:12px;">Nivel 1 - 0 / 50 XP</div>
+    </div>
 
     <div id="game-wrapper">
+        <div id="left-stats">
+            <h3>Stats</h3>
+            <div id="statsTable"></div>
+        </div>
         <canvas id="gameCanvas" width="640" height="480"></canvas>
         <div id="sidebar">
             <h3>Almas</h3>
@@ -123,12 +151,13 @@
 
         const canvas = document.getElementById('gameCanvas');
         const ctx = canvas.getContext('2d');
-        const uiClass = document.getElementById('statsClass');
-        const uiHP = document.getElementById('statsHP');
-        const uiAtk = document.getElementById('statsAtk');
-        const uiFloor = document.getElementById('statsFloor');
-        const uiLog = document.getElementById('log');
-        const divInventario = document.getElementById('inventory');
+    const uiClass = document.getElementById('statsClass');
+    const uiHP = document.getElementById('statsHP');
+    const uiAtk = document.getElementById('statsAtk');
+    const uiFloor = document.getElementById('statsFloor');
+    const uiLog = document.getElementById('log');
+    const divInventario = document.getElementById('inventory');
+    const statsTableDiv = document.getElementById('statsTable');
 
         const TILE_SIZE = 32, COLS = 20, ROWS = 15;
 
@@ -152,6 +181,69 @@
             pactoDeSangre: false, espinas: 0, ataqueDoble: 0.0, regenCombate: 0,
             guardia: false, coronaCristal: false
         };
+        // XP/Level properties
+        jugador.xp = 0;
+        jugador.level = 1;
+        jugador.skillPoints = 0;
+        function xpParaSiguiente(nivel) {
+            // Crecimiento exponencial suave
+            return Math.floor(50 * Math.pow(1.35, (nivel - 1)));
+        }
+        jugador.xpToNext = xpParaSiguiente(jugador.level);
+
+        function ganarXP(cantidad) {
+            jugador.xp += cantidad;
+            // nivelar si corresponde
+            while (jugador.xp >= jugador.xpToNext) {
+                jugador.xp -= jugador.xpToNext;
+                jugador.level++;
+                jugador.skillPoints = (jugador.skillPoints || 0) + 1;
+                // pequeñas mejoras por nivel: HP +3, ATK cada 3 niveles +1
+                jugador.maxHp += 3;
+                jugador.hp = Math.min(jugador.maxHp, jugador.hp + 3);
+                if (jugador.level % 3 === 0) jugador.atk += 1;
+                jugador.xpToNext = xpParaSiguiente(jugador.level);
+                log(`Subes al nivel ${jugador.level}! (+1 punto de habilidad)`);
+            }
+            actualizarUI();
+        }
+
+        function enemyDie(enemy) {
+            // otorgar XP básico escalado con piso
+            let baseXP = 10 + Math.floor(pisoActual * 2) + (enemy.atk || 0);
+            let xpGain = enemy.esJefe ? baseXP * 4 : baseXP + Math.floor(pisoActual * 1);
+            ganarXP(xpGain);
+
+            // drops
+            if (enemy.esJefe) {
+                let drops = 1 + Math.floor(Math.random() * 2); // 1-2
+                for (let i = 0; i < drops; i++) spawnDropAt(enemy.x, enemy.y);
+            } else {
+                let dropChance = 0.25; // 25%
+                if (Math.random() < dropChance) spawnDropAt(enemy.x, enemy.y);
+            }
+
+            // remover de lista y salir del combate
+            enemigos = enemigos.filter(e => e !== enemy);
+            enemigoActivo = null;
+            estadoJuego = "EXPLORACION";
+            actualizarUI();
+        }
+
+        function spawnDropAt(x, y) {
+            // si la casilla es válida y no hay otro objeto, ponerlo ahí
+            if (mapa[y] && mapa[y][x] === 1 && !objetosMapa.some(o => o.x === x && o.y === y)) {
+                objetosMapa.push({ x: x, y: y, data: BASE_OBJETOS[Math.floor(Math.random() * BASE_OBJETOS.length)] });
+            } else {
+                // fallback: buscar una casilla libre aleatoria
+                let libres = [];
+                for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (mapa[r][c] === 1 && !objetosMapa.some(o => o.x === c && o.y === r)) libres.push({x:c,y:r});
+                if (libres.length > 0) {
+                    let p = libres[Math.floor(Math.random() * libres.length)];
+                    objetosMapa.push({ x: p.x, y: p.y, data: BASE_OBJETOS[Math.floor(Math.random() * BASE_OBJETOS.length)] });
+                }
+            }
+        }
 
         // Pool abreviada de reliquias (mantiene las mecánicas anteriores expandidas internamente)
         const BASE_OBJETOS = [
@@ -226,6 +318,89 @@
         }
         let mensajes = [];
 
+        // ------------------ Developer console commands ------------------
+        // Alias map para nombres más humanos/amigables
+        const statAliases = {
+            'atk': 'atk', 'attack': 'atk', 'ataque': 'atk',
+            'armor': 'armor', 'arm': 'armor', 'armadura': 'armor',
+            'crit': 'critChance', 'critico': 'critChance', 'crit%': 'critChance',
+            'dodge': 'dodgeChance', 'evade': 'dodgeChance', 'evasión': 'dodgeChance', 'esquivar': 'dodgeChance',
+            'hp': 'hp', 'maxhp': 'maxHp', 'max_hp': 'maxHp',
+            'xp': 'xp', 'level': 'level', 'lvl': 'level',
+            'vamp': 'vampirismo', 'vampirismo': 'vampirismo',
+            'regen': 'regenCombate', 'regencombate': 'regenCombate',
+            'curacrit': 'curaPorCritico', 'cura_por_crit': 'curaPorCritico', 'curaporcrit': 'curaPorCritico',
+            'curapiso': 'curaPorPiso', 'cura_por_piso': 'curaPorPiso',
+            'espinas': 'espinas', 'ataquedoble': 'ataqueDoble', 'ataque_doble': 'ataqueDoble'
+        };
+
+        // Usage in DevTools console: gameCommand('help') or gc('set atk 5')
+        function gameCommand(raw) {
+            if (!raw) { console.log('gameCommand: usage: help | set <stat> <value> | give <objectName|index>'); return; }
+            let parts = String(raw).trim().split(/\s+/);
+            let cmd = parts[0].toLowerCase();
+            if (cmd === 'help') {
+                let sub = parts[1] ? parts[1].toLowerCase() : null;
+                if (!sub) {
+                    console.log('Comandos: help [set|give], set <stat> <value>, give <objectName|index>');
+                    console.log('Usa help set o help give para ver valores aceptados.');
+                    return;
+                }
+                if (sub === 'set') {
+                    console.log('Variables de jugador válidas (puedes usar estos alias):');
+                    console.log(Object.keys(jugador).filter(k => typeof jugador[k] !== 'function'));
+                    console.log('Aliases disponibles:', statAliases);
+                    return;
+                }
+                if (sub === 'give') {
+                    console.log('Objetos disponibles (por nombre exacto o índice 1..N):');
+                    BASE_OBJETOS.forEach((o, i) => console.log(`${i+1}: ${o.nom} (char='${o.char}')`));
+                    return;
+                }
+                console.log('Help: subcomando no entendido. Usa help set o help give.');
+                return;
+            }
+
+            if (cmd === 'set') {
+                let statRaw = parts[1];
+                let val = parts[2];
+                if (!statRaw || val === undefined) { console.log('Usage: set <stat> <value>'); return; }
+                let statKey = (statRaw in jugador) ? statRaw : (statAliases[statRaw.toLowerCase()] || null);
+                if (!statKey) { console.log(`Stat '${statRaw}' no encontrada en jugador.`); return; }
+                // intentar parsear número, si falla dejar string/boolean
+                let num = Number(val);
+                jugador[statKey] = isNaN(num) ? (val === 'true' ? true : val === 'false' ? false : val) : num;
+                log(`Comando: set ${statKey} = ${jugador[statKey]}`);
+                actualizarUI();
+                return;
+            }
+
+            if (cmd === 'give') {
+                let name = parts.slice(1).join(' ');
+                if (!name) { console.log('Usage: give <objectName|index> (use exact name or index)'); return; }
+                // si es número, usar índice (1-based)
+                let idx = parseInt(name);
+                let obj = null;
+                if (!isNaN(idx)) {
+                    if (idx < 1 || idx > BASE_OBJETOS.length) { console.log('Índice fuera de rango'); return; }
+                    obj = BASE_OBJETOS[idx-1];
+                } else {
+                    obj = BASE_OBJETOS.find(o => o.nom.toLowerCase() === name.toLowerCase() || o.char === name);
+                }
+                if (!obj) { console.log(`Objeto '${name}' no encontrado.`); return; }
+                // aplicar efecto directamente al jugador y añadir al inventario
+                obj.ef(jugador);
+                jugador.inventario.push(obj);
+                log(`Comando: Recibiste ${obj.nom}`);
+                actualizarUI();
+                return;
+            }
+
+            console.log('Comando no reconocido. Uso: help | set <stat> <value> | give <objectName|index>');
+        }
+        // Alias corto
+        const gc = gameCommand;
+
         function actualizarUI() {
             uiClass.innerText = `Clase: ${jugador.clase}`;
             uiHP.innerText = `HP: ${jugador.hp}/${jugador.maxHp}`;
@@ -239,6 +414,74 @@
                 tooltip.innerHTML = `<strong>${obj.nom}</strong><br>${obj.desc}`;
                 div.appendChild(tooltip); divInventario.appendChild(div);
             });
+            // Actualizar tabla de stats completa (izquierda)
+            // Incluir todas las stats relevantes del jugador
+            const stats = {
+                'ATK': jugador.atk || 0,
+                'ARMOR': jugador.armor || 0,
+                'CRIT%': Math.round((jugador.critChance || 0) * 100) + '%',
+                'EVASIÓN%': Math.round((jugador.dodgeChance || 0) * 100) + '%',
+                'VAMPIRISMO': jugador.vampirismo || 0,
+                'ESPINAS': jugador.espinas || 0,
+                'ATAQUE DOBLE%': Math.round((jugador.ataqueDoble || 0) * 100) + '%',
+                'REGEN/TURNO': jugador.regenCombate || 0,
+                'CURA/CRIT': jugador.curaPorCritico || 0,
+                'CURA/PISO': jugador.curaPorPiso || 0,
+                'MAX HP': jugador.maxHp || 0,
+                'PACTO SANGRE': jugador.pactoDeSangre ? 'SI' : 'NO',
+                'CORONA CRISTAL': jugador.coronaCristal ? 'SI' : 'NO'
+            };
+            statsTableDiv.innerHTML = '';
+            // Inicializar prevStats si no existe
+            if (!window.prevStats) window.prevStats = {};
+
+            for (let k in stats) {
+                let l = document.createElement('div'); l.className = 'label'; l.innerText = k;
+                let v = document.createElement('div'); v.className = 'value';
+
+                // mostrar diff si es numérico
+                let displayVal = stats[k];
+                let diffSpan = document.createElement('span'); diffSpan.className = 'stat-diff';
+
+                // intentar parsear valores numéricos (descartar % y booleans)
+                let prev = window.prevStats[k];
+                let curNum = null, prevNum = null;
+                if (typeof stats[k] === 'number') { curNum = stats[k]; prevNum = prev; }
+                else if (typeof stats[k] === 'string' && stats[k].endsWith('%')) {
+                    let n = parseInt(stats[k].slice(0, -1));
+                    if (!isNaN(n)) { curNum = n; prevNum = typeof prev === 'string' && prev.endsWith('%') ? parseInt(prev.slice(0, -1)) : prev; }
+                } else if (typeof stats[k] === 'string' && (stats[k] === 'SI' || stats[k] === 'NO')) {
+                    // no diff for flags
+                }
+
+                if (curNum !== null && prevNum !== undefined && !isNaN(prevNum)) {
+                    let diff = curNum - prevNum;
+                    if (diff !== 0) {
+                        diffSpan.innerText = (diff > 0 ? '+' : '') + diff;
+                        diffSpan.classList.add(diff > 0 ? 'up' : 'down');
+                        // show animation then hide
+                        setTimeout(() => diffSpan.classList.add('show'), 20);
+                        setTimeout(() => diffSpan.classList.remove('show'), 2200);
+                    }
+                }
+
+                v.innerText = displayVal;
+                if (diffSpan.innerText) {
+                    v.prepend(diffSpan);
+                }
+
+                statsTableDiv.appendChild(l); statsTableDiv.appendChild(v);
+                // store current for next comparison
+                window.prevStats[k] = stats[k];
+            }
+            // Actualizar barra de XP
+            const xpBarFill = document.getElementById('xpBarFill');
+            const xpBarText = document.getElementById('xpBarText');
+            if (xpBarFill && xpBarText) {
+                let pct = Math.min(100, Math.floor((jugador.xp / jugador.xpToNext) * 100));
+                xpBarFill.style.width = pct + '%';
+                xpBarText.innerText = `Nivel ${jugador.level} - ${jugador.xp} / ${jugador.xpToNext} XP`;
+            }
         }
 
         function seleccionarClase(opcion) {
@@ -311,7 +554,9 @@
             }
 
             if(libres.length > 0) {
-                objetosMapa.push({ x: libres.pop().x, y: libres.pop().y, data: BASE_OBJETOS[Math.floor(Math.random() * BASE_OBJETOS.length)] });
+                // Usar una única casilla libre por objeto (evitar usar x e y de pops diferentes)
+                let posObj = libres.pop();
+                objetosMapa.push({ x: posObj.x, y: posObj.y, data: BASE_OBJETOS[Math.floor(Math.random() * BASE_OBJETOS.length)] });
             }
         }
 
@@ -362,9 +607,8 @@
             if (enemigoActivo.hp <= 0) {
                 log(`¡${enemigoActivo.nombre} eliminado!`);
                 if (jugador.vampirismo > 0) { jugador.hp = Math.min(jugador.hp + jugador.vampirismo, jugador.maxHp); }
-                enemigos = enemigos.filter(e => e !== enemigoActivo);
-                enemigoActivo = null; estadoJuego = "EXPLORACION";
-                actualizarUI();
+                // manejar muerte y drops/xp
+                enemyDie(enemigoActivo);
                 return;
             }
 
@@ -380,7 +624,8 @@
 
             // Parámetros basados en si es un jefe o enemigo común
             let cantidadNotas = enemigoActivo.esJefe ? 6 : 3;
-            let velocidad = enemigoActivo.esJefe ? 5.5 : 3.5;
+            // velocidad ahora es en píxeles por segundo (estable y consistente)
+            let velocidad = enemigoActivo.esJefe ? 220 : 140; // px/s
             let letrasPosibles = ['A', 'S', 'D', 'F', 'J', 'T', 'C', 'N', 'K', 'B'];
 
             // Si el jugador eligió defenderse el turno anterior, penalizamos la velocidad de ataque del rival
@@ -394,22 +639,23 @@
                 notasQTE.push({
                     x: 600 + (i * 110), // Espaciado horizontal
                     letra: letraRandom,
-                    procesada: false
+                    procesada: false,
+                    velocidad: velocidad // cada nota conoce su velocidad en px/s
                 });
             }
             log(`¡Esquiva! Pulsa las letras cuando crucen la línea.`);
         }
 
-        function actualizarLogicaRitmo() {
+        // deltaTime en segundos
+        function actualizarLogicaRitmo(delta) {
             if (estadoJuego !== "COMBATE" || subEstadoCombate !== "RITMO_DEFENSA") return;
 
             let todasProcesadas = true;
-            let velocidad = enemigoActivo.esJefe ? 5.5 : 3.5;
-            if (jugador.guardia) velocidad *= 0.5;
 
             notasQTE.forEach(nota => {
                 if (!nota.procesada) {
-                    nota.x -= velocidad; // Desplazar hacia la izquierda
+                    // mover según velocidad en px/s y delta en segundos
+                    nota.x -= (nota.velocidad || 150) * delta;
                     todasProcesadas = false;
 
                     // Si se sale de la pantalla por la izquierda, cuenta como fallo absoluto
@@ -428,7 +674,10 @@
         }
 
         function presionarTeclaRitmo(letraPresionada) {
-            // Buscar la nota no procesada más cercana a la barra de colisión
+            // Sólo aceptamos letras A-Z
+            if (!/^[A-Z]$/.test(letraPresionada)) return;
+
+            // Buscar la nota no procesada con la MISMA letra y más cercana
             let notaCercana = null;
             let menorDistancia = 9999;
 
@@ -442,13 +691,13 @@
                 }
             });
 
+            // Si encontramos una nota de la misma letra cerca, acierto; si no, fallo
             if (notaCercana && menorDistancia <= RANGO_HIT) {
-                // ¡Esquive exitoso!
                 notaCercana.procesada = true;
                 aciertosQTE++;
                 playSFX("sfx_esquive_perfecto");
             } else {
-                // Si pulsa una tecla incorrecta o fuera de tiempo de forma errática
+                // No había nota de esa letra en la zona válida
                 fallosQTE++;
                 playSFX("sfx_nota_fallada");
             }
@@ -462,19 +711,25 @@
             let dmgFinal = Math.ceil(dmgBaseEnemigo * ratioFallos);
             if (jugador.guardia) dmgFinal = Math.ceil(dmgFinal / 2); // Mitigación extra por escudo
 
-            // Aplicar reducción estática por armadura
-            dmgFinal = Math.max(0, dmgFinal - jugador.armor);
-            
-            if (dmgFinal > 0) {
-                if (Math.random() < jugador.dodgeChance && !enemigoActivo.esJefe) {
-                    log("¡Tu Capa pasiva te salvó milagrosamente de recibir daño!");
-                } else {
-                    jugador.hp -= dmgFinal;
-                    log(`Recibes ${dmgFinal} de daño por fallar el ritmo.`);
-                    playSFX("sfx_dano_recibido");
-                }
-            } else {
+            // Si no hubo fallos (esquiva perfecta), no se aplica daño bajo ninguna circunstancia
+            if (ratioFallos === 0) {
                 log("¡ESQUIVE PERFECTO! Te deslizas entre los ataques sin un rasguño.");
+            } else {
+                // Aplicar reducción estática por armadura, pero no permitir que armadura negativa convierta en curación
+                let reduccion = jugador.armor || 0;
+                let aplicado = Math.max(0, dmgFinal - reduccion);
+
+                if (aplicado > 0) {
+                    if (Math.random() < jugador.dodgeChance && !enemigoActivo.esJefe) {
+                        log("¡Esquivas todo el daño!");
+                    } else {
+                        jugador.hp -= aplicado;
+                        log(`Recibes ${aplicado} de daño por fallar el ritmo.`);
+                        playSFX("sfx_dano_recibido");
+                    }
+                } else {
+                    log("¡ESQUIVE PERFECTO! Te deslizas entre los ataques sin un rasguño.");
+                }
             }
 
             // Daño por espinas pasivas si el enemigo te tocó
@@ -489,8 +744,7 @@
                 log("EL VACÍO HA RECLAMADO TU ALMA.<br>F5 o recarga para reintentar.");
             } else if (enemigoActivo.hp <= 0) {
                 log(`¡Las espinas destruyeron a ${enemigoActivo.nombre}!`);
-                enemigos = enemigos.filter(e => e !== enemigoActivo);
-                enemigoActivo = null; estadoJuego = "EXPLORACION";
+                enemyDie(enemigoActivo);
             } else {
                 // Volver a dar el turno al jugador
                 subEstadoCombate = "MENU";
@@ -579,9 +833,8 @@
                     if (e.key === '2') procesarMenuCombate('DEFENDER');
                     if (e.key === '3') procesarMenuCombate('HUIR');
                 } else if (subEstadoCombate === "RITMO_DEFENSA") {
-                    if (['A', 'S', 'D', 'F'].includes(keyUpper)) {
-                        presionarTeclaRitmo(keyUpper);
-                    }
+                    // Forward any A-Z letter to the QTE handler
+                    if (/^[A-Z]$/.test(keyUpper)) presionarTeclaRitmo(keyUpper);
                 }
             }
         });
@@ -589,13 +842,27 @@
         // ============================================================================
         // 🖥️ BUCLE PRINCIPAL DE JUEGO Y RENDERIZADO CANVAS
         // ============================================================================
-        function gameLoop() {
-            // Ejecutar cálculos lógicos del minijuego de ritmo de forma fluida
-            actualizarLogicaRitmo();
-            
-            // Renderizar la escena correspondiente
-            dibujar();
+        // --- Bucle fijo a 30 FPS con delta time para consistencia entre dispositivos ---
+        let lastTime = performance.now();
+        const TARGET_FPS = 30;
+        const FRAME_DURATION = 1000 / TARGET_FPS; // ms
 
+        function gameLoop(now) {
+            // now es en ms
+            let elapsed = now - lastTime;
+            if (elapsed >= FRAME_DURATION - 0.5) {
+                // convertir a segundos para las funciones lógicas
+                let deltaSec = elapsed / 1000;
+
+                // Lógica dependiente de tiempo
+                actualizarLogicaRitmo(deltaSec);
+
+                // Render
+                dibujar();
+
+                lastTime = now;
+            }
+            // Usamos rAF para estabilidad pero limitamos actualizaciones a 30fps
             requestAnimationFrame(gameLoop);
         }
 
@@ -660,12 +927,10 @@
                     ctx.fillText("[1] Ejecutar Ataque", 60, canvas.height-120);
                     ctx.fillText("[2] Posición de Guardia (Ralentiza notas de ritmo)", 60, canvas.height-85);
                     ctx.fillText("[3] Huir del peligro", 60, canvas.height-50);
-                } 
-                
-                else if (subEstadoCombate === "RITMO_DEFENSA") {
+                } else if (subEstadoCombate === "RITMO_DEFENSA") {
                     ctx.textAlign = "left"; ctx.font = "bold 14px monospace";
                     ctx.fillText("¡CUIDADO! EL ENEMIGO CONTRAATACA. DEFIÉNDETE:", 60, canvas.height-130);
-                    
+
                     // Render de la pista de ritmo interactiva
                     let pistaY = canvas.height - 75;
                     ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
@@ -681,7 +946,8 @@
                     ctx.font = "bold 20px monospace";
                     notasQTE.forEach(nota => {
                         if (!nota.procesada) {
-                            ctx.fillStyle = (Math.abs(nota.x - X_ZONA_HIT) <= RANGO_HIT) ? "#55ff55" : "#fff";
+                            // rojo cuando no está en zona de pulsado, verde cuando es pulsable
+                            ctx.fillStyle = (Math.abs(nota.x - X_ZONA_HIT) <= RANGO_HIT) ? "#55ff55" : "#ff5555";
                             ctx.fillText(nota.letra, nota.x, pistaY);
                         }
                     });
