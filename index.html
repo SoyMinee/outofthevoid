@@ -15,16 +15,18 @@
         canvas { background-color: #000; border: 2px solid #fff; image-rendering: pixelated; }
         #sidebar {
             width: 280px; height: 480px; border: 1px solid #555; padding: 10px;
-            box-sizing: border-box; display: flex; flex-direction: column; overflow-y: auto;
+            box-sizing: border-box; display: flex; flex-direction: column; overflow: visible;
         }
+        #sidebar-footer { margin-top: 8px; display:flex; justify-content:center; }
         #left-stats {
-            width: 220px; height: 480px; border: 1px solid #555; padding: 10px;
+            width: 220px; height: 620px; border: 1px solid #555; padding: 10px;
             box-sizing: border-box; display: flex; flex-direction: column; overflow-y: auto;
             margin-right: 6px;
         }
-        #statsTable { font-size: 14px; color: #fff; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    #statsTable { font-size: 14px; color: #fff; display: grid; grid-template-columns: 1fr 40px 1fr; gap: 6px; align-items: center; }
         #statsTable .label { color: #ccc; text-align: left; }
-        #statsTable .value { color: #ffeb3b; text-align: right; }
+    #statsTable .value { color: #ffeb3b; text-align: right; }
+    #statsTable .diff { text-align: center; font-size: 12px; }
         .stat-diff {
             display: inline-block;
             font-size: 12px;
@@ -37,10 +39,16 @@
         .stat-diff.down { color: #ff6961; } /* rojo claro */
         .stat-diff.show { opacity: 1; transform: translateY(0); }
         .stat-diff.hide { opacity: 0; transform: translateY(-6px); transition: opacity 500ms ease, transform 500ms ease; }
+    /* Centrar el panel central y ajustar log */
+    #game-wrapper { display: flex; gap: 12px; align-items: flex-start; justify-content: center; }
+    #center-panel { display:flex; flex-direction:column; align-items:center; }
+
+    /* QTE: fuente más gruesa y letras por encima de la linea */
+    .qte-letter { font-weight: 900; font-family: monospace; }
         #sidebar::-webkit-scrollbar { width: 5px; }
         #sidebar::-webkit-scrollbar-thumb { background: #555; }
         #sidebar h3 { margin-top: 0; text-align: center; border-bottom: 1px dashed #555; padding-bottom: 10px; }
-        #inventory { display: flex; flex-wrap: wrap; gap: 8px; align-content: flex-start; }
+    #inventory { display: flex; flex-wrap: wrap; gap: 8px; align-content: flex-start; overflow-y: auto; flex: 1 1 auto; padding-right: 6px; }
         
         .inv-item {
             width: 36px; height: 36px; border: 1px solid #fff; display: flex;
@@ -72,6 +80,19 @@
         .inv-item:hover .tooltip { visibility: visible; opacity: 1; z-index: 30; }
         .tooltip strong { color: #ffeb3b; }
 
+        /* Botón NOVEDADES integrado */
+        .btn-novedades {
+            margin-top: 10px;
+            padding: 8px 10px;
+            background: linear-gradient(180deg,#141414,#0b0b0b);
+            color: #ffeb3b;
+            border: 1px solid #444;
+            font-family: monospace; font-weight: 700; letter-spacing: 1px;
+            cursor: pointer; align-self: center;
+            width: calc(100% - 20px);
+        }
+        .btn-novedades:hover { border-color: #777; color: #fff; }
+
         #ui { width: 640px; display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 16px; }
         #log {
             width: 640px; height: 80px; margin-top: 10px; border: 1px solid #555;
@@ -87,24 +108,26 @@
         <span id="statsAtk">ATK: 0 | ARMOR: 0</span>
         <span id="statsFloor">Piso: 1</span>
     </div>
-    <div id="xpBarContainer" style="width: 640px; height: 14px; border:1px solid #555; margin-top:6px;">
-        <div id="xpBarFill" style="height:100%; width:0%; background: linear-gradient(90deg,#6a9cff,#3b7fff);"></div>
-        <div id="xpBarText" style="position:relative; margin-top:-14px; text-align:center; color:#fff; font-size:12px;">Nivel 1 - 0 / 50 XP</div>
-    </div>
-
     <div id="game-wrapper">
         <div id="left-stats">
             <h3>Stats</h3>
             <div id="statsTable"></div>
         </div>
-        <canvas id="gameCanvas" width="640" height="480"></canvas>
+
+        <div id="center-panel" style="display:flex; flex-direction:column; align-items:center; gap:8px;">
+            <div id="xpBarContainer" style="width:640px; height:14px; border:1px solid #555;">
+                <div id="xpBarFill" style="height:100%; width:0%; background: linear-gradient(90deg,#6a9cff,#3b7fff);"></div>
+                <div id="xpBarText" style="position:relative; margin-top:-14px; text-align:center; color:#fff; font-size:12px;">Nivel 1 - 0 / 50 XP</div>
+            </div>
+            <canvas id="gameCanvas" width="640" height="480"></canvas>
+            <div id="log" style="width:640px; height:80px; border:1px solid #555; padding:5px; color:#ccc; overflow-y:hidden;">Cargando el Vacío...</div>
+        </div>
+
         <div id="sidebar">
             <h3>Almas</h3>
             <div id="inventory"></div>
         </div>
     </div>
-
-    <div id="log">Cargando el Vacío...</div>
     <div id="global-tooltip"></div>
 
     <script>
@@ -389,6 +412,8 @@
                 }
                 if (!obj) { console.log(`Objeto '${name}' no encontrado.`); return; }
                 // aplicar efecto directamente al jugador y añadir al inventario
+                // snapshot before giving so diffs are accurate
+                if (typeof snapshotDisplayStats === 'function') snapshotDisplayStats();
                 obj.ef(jugador);
                 jugador.inventario.push(obj);
                 log(`Comando: Recibiste ${obj.nom}`);
@@ -401,12 +426,25 @@
         // Alias corto
         const gc = gameCommand;
 
+        function sanitizeStats() {
+            for (let k in jugador) {
+                if (typeof jugador[k] === 'number') {
+                    if (k === 'armor') continue;
+                    if (jugador[k] < 0) jugador[k] = 0;
+                }
+            }
+        }
+
         function actualizarUI() {
+            // sanitize numerical stats (except armor)
+            sanitizeStats();
+
             uiClass.innerText = `Clase: ${jugador.clase}`;
             uiHP.innerText = `HP: ${jugador.hp}/${jugador.maxHp}`;
             uiAtk.innerText = `ATK: ${jugador.atk} | ARMOR: ${jugador.armor}`;
             uiFloor.innerText = `Piso: ${pisoActual} ${pisoActual % 3 === 0 ? '¡JEFE!' : ''}`;
 
+            // Inventario
             divInventario.innerHTML = '';
             jugador.inventario.forEach(obj => {
                 let div = document.createElement('div'); div.className = 'inv-item'; div.innerText = obj.char;
@@ -414,8 +452,28 @@
                 tooltip.innerHTML = `<strong>${obj.nom}</strong><br>${obj.desc}`;
                 div.appendChild(tooltip); divInventario.appendChild(div);
             });
-            // Actualizar tabla de stats completa (izquierda)
-            // Incluir todas las stats relevantes del jugador
+
+                // Botón NOVEDADES bajo inventario
+                let novedadesBtn = document.getElementById('btnNovedades');
+                if (!novedadesBtn) {
+                    // asegurar contenedor footer debajo del inventario
+                    let footer = document.getElementById('sidebar-footer');
+                    if (!footer) {
+                        footer = document.createElement('div'); footer.id = 'sidebar-footer';
+                        document.getElementById('sidebar').appendChild(footer);
+                    }
+
+                    novedadesBtn = document.createElement('button');
+                    novedadesBtn.id = 'btnNovedades';
+                    novedadesBtn.className = 'btn-novedades';
+                    novedadesBtn.innerText = 'NOVEDADES';
+                    footer.appendChild(novedadesBtn);
+                    novedadesBtn.addEventListener('click', () => {
+                        openNovedades();
+                    });
+                }
+
+            // Stats table (3 columns: label, diff, value)
             const stats = {
                 'ATK': jugador.atk || 0,
                 'ARMOR': jugador.armor || 0,
@@ -431,49 +489,45 @@
                 'PACTO SANGRE': jugador.pactoDeSangre ? 'SI' : 'NO',
                 'CORONA CRISTAL': jugador.coronaCristal ? 'SI' : 'NO'
             };
-            statsTableDiv.innerHTML = '';
-            // Inicializar prevStats si no existe
-            if (!window.prevStats) window.prevStats = {};
 
+            statsTableDiv.innerHTML = '';
+            if (!window.prevStats) window.prevStats = {};
             for (let k in stats) {
                 let l = document.createElement('div'); l.className = 'label'; l.innerText = k;
+                let diffCell = document.createElement('div'); diffCell.className = 'diff';
                 let v = document.createElement('div'); v.className = 'value';
 
-                // mostrar diff si es numérico
                 let displayVal = stats[k];
-                let diffSpan = document.createElement('span'); diffSpan.className = 'stat-diff';
-
-                // intentar parsear valores numéricos (descartar % y booleans)
                 let prev = window.prevStats[k];
-                let curNum = null, prevNum = null;
-                if (typeof stats[k] === 'number') { curNum = stats[k]; prevNum = prev; }
-                else if (typeof stats[k] === 'string' && stats[k].endsWith('%')) {
-                    let n = parseInt(stats[k].slice(0, -1));
-                    if (!isNaN(n)) { curNum = n; prevNum = typeof prev === 'string' && prev.endsWith('%') ? parseInt(prev.slice(0, -1)) : prev; }
-                } else if (typeof stats[k] === 'string' && (stats[k] === 'SI' || stats[k] === 'NO')) {
-                    // no diff for flags
-                }
 
-                if (curNum !== null && prevNum !== undefined && !isNaN(prevNum)) {
-                    let diff = curNum - prevNum;
+                // compute numeric diffs for numbers and percentages
+                if (typeof stats[k] === 'number' && typeof prev === 'number') {
+                    let diff = stats[k] - prev;
                     if (diff !== 0) {
-                        diffSpan.innerText = (diff > 0 ? '+' : '') + diff;
-                        diffSpan.classList.add(diff > 0 ? 'up' : 'down');
-                        // show animation then hide
-                        setTimeout(() => diffSpan.classList.add('show'), 20);
-                        setTimeout(() => diffSpan.classList.remove('show'), 2200);
+                        let span = document.createElement('span'); span.className = 'stat-diff ' + (diff>0? 'up':'down'); span.innerText = (diff>0?'+':'')+diff;
+                        diffCell.appendChild(span);
+                        setTimeout(() => span.classList.add('show'), 20);
+                        setTimeout(() => span.classList.remove('show'), 2200);
+                    }
+                } else if (typeof stats[k] === 'string' && stats[k].endsWith('%') && typeof prev === 'string' && prev.endsWith('%')) {
+                    let ncur = parseInt(stats[k].slice(0,-1));
+                    let nprev = parseInt(prev.slice(0,-1));
+                    if (!isNaN(ncur) && !isNaN(nprev)) {
+                        let diff = ncur - nprev;
+                        if (diff !== 0) {
+                            let span = document.createElement('span'); span.className = 'stat-diff ' + (diff>0? 'up':'down'); span.innerText = (diff>0?'+':'')+diff;
+                            diffCell.appendChild(span);
+                            setTimeout(() => span.classList.add('show'), 20);
+                            setTimeout(() => span.classList.remove('show'), 2200);
+                        }
                     }
                 }
 
                 v.innerText = displayVal;
-                if (diffSpan.innerText) {
-                    v.prepend(diffSpan);
-                }
-
-                statsTableDiv.appendChild(l); statsTableDiv.appendChild(v);
-                // store current for next comparison
+                statsTableDiv.appendChild(l); statsTableDiv.appendChild(diffCell); statsTableDiv.appendChild(v);
                 window.prevStats[k] = stats[k];
             }
+
             // Actualizar barra de XP
             const xpBarFill = document.getElementById('xpBarFill');
             const xpBarText = document.getElementById('xpBarText');
@@ -483,6 +537,64 @@
                 xpBarText.innerText = `Nivel ${jugador.level} - ${jugador.xp} / ${jugador.xpToNext} XP`;
             }
         }
+
+        // Dev helper: devuelve el objeto de stats en el formato mostrado por actualizarUI
+        function getDisplayStats() {
+            return {
+                'ATK': jugador.atk || 0,
+                'ARMOR': jugador.armor || 0,
+                'CRIT%': Math.round((jugador.critChance || 0) * 100) + '%',
+                'EVASIÓN%': Math.round((jugador.dodgeChance || 0) * 100) + '%',
+                'VAMPIRISMO': jugador.vampirismo || 0,
+                'ESPINAS': jugador.espinas || 0,
+                'ATAQUE DOBLE%': Math.round((jugador.ataqueDoble || 0) * 100) + '%',
+                'REGEN/TURNO': jugador.regenCombate || 0,
+                'CURA/CRIT': jugador.curaPorCritico || 0,
+                'CURA/PISO': jugador.curaPorPiso || 0,
+                'MAX HP': jugador.maxHp || 0,
+                'PACTO SANGRE': jugador.pactoDeSangre ? 'SI' : 'NO',
+                'CORONA CRISTAL': jugador.coronaCristal ? 'SI' : 'NO'
+            };
+        }
+
+        function snapshotDisplayStats() {
+            window.prevStats = getDisplayStats();
+        }
+
+                // Abre un modal flotante mostrando el contenido de log.md (o mensaje de fallback)
+                function openNovedades() {
+                    // crear modal si no existe
+                    let modal = document.getElementById('modalNovedades');
+                    if (!modal) {
+                        modal = document.createElement('div'); modal.id = 'modalNovedades';
+                        modal.style.position = 'fixed'; modal.style.left = '50%'; modal.style.top = '50%';
+                        modal.style.transform = 'translate(-50%,-50%)'; modal.style.background = '#111';
+                        modal.style.color = '#fff'; modal.style.padding = '18px'; modal.style.border = '2px solid #fff';
+                        modal.style.maxWidth = '80%'; modal.style.maxHeight = '70%'; modal.style.overflow = 'auto';
+                        modal.style.zIndex = 9999; modal.style.boxShadow = '0 6px 24px rgba(0,0,0,0.6)';
+                        let close = document.createElement('button'); close.innerText = 'Cerrar';
+                        close.style.position = 'absolute'; close.style.right = '8px'; close.style.top = '8px';
+                        close.addEventListener('click', () => modal.remove());
+                        modal.appendChild(close);
+                        let content = document.createElement('div'); content.id = 'modalNovedadesContent'; content.style.whiteSpace = 'pre-wrap'; content.style.marginTop = '26px';
+                        modal.appendChild(content);
+                        document.body.appendChild(modal);
+                    }
+
+                    let contentDiv = document.getElementById('modalNovedadesContent');
+                    contentDiv.innerText = 'Cargando novedades...';
+
+                    // intentar obtener log.md en la raíz del proyecto
+                    fetch('log.md').then(r => {
+                        if (!r.ok) throw new Error('No encontrado');
+                        return r.text();
+                    }).then(txt => {
+                        contentDiv.innerText = txt;
+                    }).catch(() => {
+                        // fallback: mostrar un mensaje si no existe
+                        contentDiv.innerText = 'No se encontró el archivo log.md en el proyecto.\n\nPuedes crear un archivo llamado log.md en la raíz con las novedades.';
+                    });
+                }
 
         function seleccionarClase(opcion) {
             if(opcion === 1) { jugador.clase = "Caballero"; jugador.maxHp = 20; jugador.hp = 20; jugador.atk = 2; jugador.armor = 1; }
@@ -625,7 +737,10 @@
             // Parámetros basados en si es un jefe o enemigo común
             let cantidadNotas = enemigoActivo.esJefe ? 6 : 3;
             // velocidad ahora es en píxeles por segundo (estable y consistente)
-            let velocidad = enemigoActivo.esJefe ? 220 : 140; // px/s
+            let baseVel = enemigoActivo.esJefe ? 220 : 140; // px/s
+            // escalar con el piso: aumenta un 5% por piso, hasta un cap
+            let scale = 1 + Math.min(0.5, pisoActual * 0.05); // hasta +50%
+            let velocidad = Math.floor(baseVel * scale);
             let letrasPosibles = ['A', 'S', 'D', 'F', 'J', 'T', 'C', 'N', 'K', 'B'];
 
             // Si el jugador eligió defenderse el turno anterior, penalizamos la velocidad de ataque del rival
@@ -732,6 +847,12 @@
                 }
             }
 
+            // Aplicar regeneración por turno si corresponde
+            if (jugador.regenCombate && jugador.regenCombate > 0 && jugador.hp > 0) {
+                jugador.hp = Math.min(jugador.maxHp, jugador.hp + jugador.regenCombate);
+                if (jugador.regenCombate > 0) log(`Recuperas ${jugador.regenCombate} HP por efecto de regeneración.`);
+            }
+
             // Daño por espinas pasivas si el enemigo te tocó
             if (jugador.espinas > 0 && ratioFallos > 0) {
                 enemigoActivo.hp -= jugador.espinas;
@@ -770,6 +891,8 @@
             let objIndex = objetosMapa.findIndex(o => o.x === jugador.x && o.y === jugador.y);
             if (objIndex > -1) {
                 let rec = objetosMapa[objIndex].data;
+                // Snapshot displayed stats before applying the item's effect so diffs show true change
+                if (typeof snapshotDisplayStats === 'function') snapshotDisplayStats();
                 rec.ef(jugador);
                 if (jugador.coronaCristal) { jugador.maxHp = 1; jugador.hp = 1; }
                 jugador.inventario.push(rec);
@@ -933,6 +1056,19 @@
 
                     // Render de la pista de ritmo interactiva
                     let pistaY = canvas.height - 75;
+
+                    // Primero dibujamos una "capa sombra" de las letras (esto quedará debajo de la línea)
+                    ctx.font = "900 30px monospace";
+                    notasQTE.forEach(nota => {
+                        if (!nota.procesada) {
+                            // interpolar posición usando accumulator para suavizar
+                            let drawX = nota.x - ((nota.velocidad || 150) * (typeof accumulator !== 'undefined' ? accumulator : 0));
+                            ctx.fillStyle = "rgba(0,0,0,0.6)"; // sombra/parte trasera
+                            ctx.fillText(nota.letra, drawX, pistaY - 0);
+                        }
+                    });
+
+                    // Ahora la línea
                     ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
                     ctx.beginPath(); ctx.moveTo(60, pistaY); ctx.lineTo(580, pistaY); ctx.stroke();
 
@@ -942,22 +1078,48 @@
                     ctx.fillStyle = "#fff"; ctx.font = "10px monospace"; ctx.textAlign = "center";
                     ctx.fillText("HIT", X_ZONA_HIT, pistaY + 30);
 
-                    // Renderizar las letras voladoras
-                    ctx.font = "bold 20px monospace";
+                    // Renderizar las letras voladoras: encima de la línea (capa frontal)
+                    ctx.font = "900 30px monospace";
                     notasQTE.forEach(nota => {
                         if (!nota.procesada) {
+                            let drawX = nota.x - ((nota.velocidad || 150) * (typeof accumulator !== 'undefined' ? accumulator : 0));
                             // rojo cuando no está en zona de pulsado, verde cuando es pulsable
-                            ctx.fillStyle = (Math.abs(nota.x - X_ZONA_HIT) <= RANGO_HIT) ? "#55ff55" : "#ff5555";
-                            ctx.fillText(nota.letra, nota.x, pistaY);
+                            ctx.fillStyle = (Math.abs((nota.x) - X_ZONA_HIT) <= RANGO_HIT) ? "#55ff55" : "#ff5555";
+                            ctx.fillText(nota.letra, drawX, pistaY - 0);
                         }
                     });
                 }
             }
         }
 
-        // --- Lanzar la ejecución continua ---
-        gameLoop();
-        actualizarUI();
+                // --- Bucle principal con fixed timestep para evitar 'saltos' en la lógica ---
+                let accumulator = 0;
+                const FIXED_DT = 1 / 30; // segundos
+                let lastFrame = performance.now();
+
+                function gameLoop(now) {
+                    let ms = now - lastFrame;
+                    if (ms > 250) ms = 250; // evitar spiral of death
+                    lastFrame = now;
+
+                    accumulator += ms / 1000;
+                    let steps = 0;
+                    while (accumulator >= FIXED_DT && steps < 5) {
+                        // actualizar lógica con paso fijo
+                        actualizarLogicaRitmo(FIXED_DT);
+                        accumulator -= FIXED_DT;
+                        steps++;
+                    }
+
+                    // Render
+                    dibujar();
+
+                    requestAnimationFrame(gameLoop);
+                }
+
+                // --- Lanzar la ejecución continua ---
+                requestAnimationFrame(gameLoop);
+                actualizarUI();
     </script>
 </body>
 </html>
